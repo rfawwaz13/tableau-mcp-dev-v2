@@ -1,0 +1,11 @@
+mcp>=1.2.0
+httpx>=0.27.0
+python-dotenv>=1.0.1
+fastapi>=0.111.0
+uvicorn[standard]>=0.30.0
+websockets>=12.0
+
+# LLM provider — install salah satu sesuai LLM_PROVIDER di .env
+# (boleh juga keduanya sekaligus kalau ingin gampang switch bolak-balik)
+google-genai>=0.3.0     # dipakai jika LLM_PROVIDER=gemini
+openai>=1.30.0          # dipakai jika LLM_PROVIDER=openai

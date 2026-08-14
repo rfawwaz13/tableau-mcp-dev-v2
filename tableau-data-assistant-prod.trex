@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest manifest-version="0.1" xmlns="http://www.tableau.com/xml/extension_manifest">
+  <dashboard-extension id="com.perusahaananda.tableau-data-assistant" extension-version="1.0.0">
+
+    <default-locale>id_ID</default-locale>
+    <name resource-id="name"/>
+    <description>Data Assistant berbasis Gemini yang membaca filter/konteks dashboard secara langsung dan bisa menjawab pertanyaan tentang datasource Tableau Anda.</description>
+    <author name="Tim Analitik Anda" email="analitik@perusahaan-anda.com" organization="Perusahaan Anda" website="https://perusahaan-anda.com"/>
+
+    <min-api-version>1.10</min-api-version>
+
+    <source-location>
+      <!--
+        Ganti dengan URL HTTPS tempat web_app.py Anda di-deploy.
+        Untuk development lokal lewat "Tableau Extensions - localhost only"
+        Anda bisa memakai http://localhost:8000 (lihat README bagian testing).
+      -->
+      <url>http://localhost:8005/</url>
+    </source-location>
+
+    <icon>
+      iVBORw0KGgoAAAANSUhEUgAAABoAAAAaCAYAAACpSkzOAAAAwUlEQVR4nL2WwRHCMAwEhQqAMuEF
+      tcALyoQGwsszGcenOyUa6xlLu7bsODGbFCc18Xy/LqPnv9dHYoRJCI4iknqVhNUMRXskrHYjOiKJ
+      GM4SqmSOBqpl8DBE8X2+0zVpUZNkZW6mt62HK7LGlleEoOrKJBGDKTIqUmfM8qjo8rhJIpYntY5B
+      lMm4mXbVIxiTNHbqPeqhalvTojU8IzHrPnzV9916SxwNVEo2oirZiDHcoyMyVAsPwx5ZVDPtd2ta
+      /AEv1VwLo6J62AAAAABJRU5ErkJggg==
+    </icon>
+
+    <permissions>
+      <permission>full data</permission>
+    </permissions>
+
+  </dashboard-extension>
+
+  <!--
+    Resource string untuk nama extension.
+    Sesuaikan/tambahkan locale lain jika perlu.
+  -->
+  <resources>
+    <resource id="name">
+      <text locale="id_ID">Data Assistant</text>
+      <text locale="en_US">Data Assistant</text>
+    </resource>
+  </resources>
+
+</manifest>

@@ -22,8 +22,9 @@ const DEFAULT_SUGGESTIONS = [
 
 let ws = null;
 let currentAssistantEl = null;
-let currentTraceEl = null;
 let thinkingEl = null;
+let thinkingStartTime = null;
+let thinkingInterval = null;
 
 function scrollToBottom() {
   thread.scrollTop = thread.scrollHeight;
@@ -68,68 +69,64 @@ function addUserMessage(text) {
 function startAssistantMessage() {
   currentAssistantEl = document.createElement("div");
   currentAssistantEl.className = "msg assistant";
+  const bubble = document.createElement("div");
+  bubble.className = "bubble";
+  currentAssistantEl.appendChild(bubble);
   thread.appendChild(currentAssistantEl);
 }
 
+function formatDuration(ms) {
+  return `${(ms / 1000).toFixed(1)}s`;
+}
+
 function showThinking() {
+  thinkingStartTime = performance.now();
   thinkingEl = document.createElement("div");
   thinkingEl.className = "thinking";
-  thinkingEl.innerHTML = "<span></span><span></span><span></span>";
+  thinkingEl.innerHTML =
+    '<span class="thinking-dots"><span></span><span></span><span></span></span>' +
+    '<span class="thinking-timer">0.0s</span>';
   thread.appendChild(thinkingEl);
   scrollToBottom();
+
+  const timerEl = thinkingEl.querySelector(".thinking-timer");
+  thinkingInterval = setInterval(() => {
+    if (!timerEl) return;
+    timerEl.textContent = formatDuration(performance.now() - thinkingStartTime);
+  }, 100);
 }
 
 function removeThinking() {
+  if (thinkingInterval) {
+    clearInterval(thinkingInterval);
+    thinkingInterval = null;
+  }
   if (thinkingEl) {
     thinkingEl.remove();
     thinkingEl = null;
   }
 }
 
-function addToolCall(name, args) {
-  removeThinking();
-  const trace = document.createElement("div");
-  trace.className = "trace";
+function appendAssistantMeta(elapsedMs, tokens) {
+  if (!currentAssistantEl) return;
+  if (typeof elapsedMs !== "number" && !tokens) return;
 
-  const line = document.createElement("div");
-  line.className = "trace-line";
-  line.innerHTML = `<span class="trace-arrow">→</span><span class="trace-name">${escapeHtml(
-    name
-  )}</span><span class="trace-args">${escapeHtml(JSON.stringify(args))}</span>`;
-  trace.appendChild(line);
+  const total =
+    tokens && typeof tokens.total === "number"
+      ? tokens.total
+      : tokens
+      ? (tokens.prompt || 0) + (tokens.completion || 0)
+      : null;
 
-  thread.appendChild(trace);
-  currentTraceEl = trace;
-  scrollToBottom();
-  showThinking();
-}
+  const parts = [];
+  if (typeof elapsedMs === "number") parts.push(`⏱ ${formatDuration(elapsedMs)}`);
+  if (typeof total === "number" && total > 0) parts.push(`🔤 ${total.toLocaleString("id-ID")} token`);
+  if (parts.length === 0) return;
 
-function addToolResult(result) {
-  if (!currentTraceEl) return;
-  const resultEl = document.createElement("div");
-  resultEl.className = "trace-result";
-  resultEl.textContent = result;
-  currentTraceEl.appendChild(resultEl);
-
-  if (result.length > 260) {
-    const toggle = document.createElement("button");
-    toggle.className = "trace-toggle";
-    toggle.textContent = "tampilkan semua";
-    toggle.addEventListener("click", () => {
-      resultEl.classList.toggle("expanded");
-      toggle.textContent = resultEl.classList.contains("expanded")
-        ? "sembunyikan"
-        : "tampilkan semua";
-    });
-    currentTraceEl.appendChild(toggle);
-  }
-  scrollToBottom();
-}
-
-function escapeHtml(str) {
-  const div = document.createElement("div");
-  div.textContent = str;
-  return div.innerHTML;
+  const meta = document.createElement("div");
+  meta.className = "msg-meta";
+  meta.textContent = parts.join("  ·  ");
+  currentAssistantEl.appendChild(meta);
 }
 
 function setStatus(state, label) {
@@ -159,19 +156,17 @@ function connect() {
         break;
 
       case "tool_call":
-        addToolCall(data.name, data.args);
-        break;
-
       case "tool_result":
-        addToolResult(data.result);
+        // Proses internal (pemanggilan tool) sengaja tidak ditampilkan ke
+        // pengguna — indikator "thinking" tetap berjalan sampai jawaban final.
         break;
 
       case "final":
         removeThinking();
         if (!currentAssistantEl) startAssistantMessage();
-        currentAssistantEl.textContent = data.text;
+        currentAssistantEl.querySelector(".bubble").textContent = data.text;
+        appendAssistantMeta(data.elapsed_ms, data.tokens);
         currentAssistantEl = null;
-        currentTraceEl = null;
         setComposerEnabled(true);
         scrollToBottom();
         break;
@@ -180,7 +175,7 @@ function connect() {
         removeThinking();
         setStatus("error", "terjadi kesalahan");
         startAssistantMessage();
-        currentAssistantEl.textContent = `⚠ ${data.message}`;
+        currentAssistantEl.querySelector(".bubble").textContent = `⚠ ${data.message}`;
         currentAssistantEl = null;
         setComposerEnabled(true);
         break;

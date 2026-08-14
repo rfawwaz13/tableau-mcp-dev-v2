@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "tableau-assistant",
+      "runtimeExecutable": ".venv/Scripts/uvicorn.exe",
+      "runtimeArgs": ["web_app:app", "--host", "127.0.0.1", "--port", "8000"],
+      "port": 8000
+    }
+  ]
+}

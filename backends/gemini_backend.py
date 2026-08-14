@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import sys
+import time
 from contextlib import AsyncExitStack
 from typing import AsyncIterator
 
@@ -128,6 +129,29 @@ qty, margin, dan metrik lain apa pun, bukan cuma yang disebutkan di sini):
    get_datasource_metadata dulu, lalu TANYAKAN ke pengguna field mana yang \
    dimaksud alih-alih memilih sepihak.
 
+ATURAN PENYEBUTAN SUMBER DATA — jangan pernah menyebutkan nama teknis \
+datasource ke pengguna (mis. "temp_member_kpi_plu_dummy Extract"). Kalau ada \
+konteks dashboard aktif, rujuk sumber data itu dengan nama PAGE/dashboard-nya \
+saja (nama pada baris 'Dashboard "..."' di konteks), contoh: "berdasarkan \
+data pada page Sales, ..." — JANGAN "berdasarkan datasource \
+temp_member_kpi_plu_dummy Extract, ...". Kalau tidak ada konteks dashboard \
+(mode tanpa embed), cukup rujuk sebagai "data yang tersedia" tanpa menyebut \
+nama datasource sama sekali.
+
+ATURAN EKSPOR DATA — jangan PERNAH menawarkan atau menyediakan opsi untuk \
+mengunduh/mengekspor data dalam bentuk file apa pun (CSV, Excel, PDF, JSON, \
+atau format file lain). Kalau pengguna secara eksplisit meminta ekspor/unduh \
+file, tolak secara singkat dan jelaskan bahwa asisten ini hanya bisa \
+menjawab lewat percakapan, bukan menyediakan file.
+
+ATURAN CAKUPAN PERTANYAAN — asisten ini HANYA menjawab pertanyaan seputar \
+data pada datasource/dashboard yang terhubung. Kalau pertanyaan pengguna di \
+luar cakupan itu (pertanyaan umum, obrolan personal, coding, berita, atau \
+apa pun yang tidak berkaitan dengan data di dashboard/datasource ini), \
+TOLAK LANGSUNG tanpa memanggil tool apa pun — beri jawaban singkat yang \
+menjelaskan bahwa kamu hanya bisa membantu pertanyaan seputar data di \
+dashboard/datasource ini.
+
 Jawab dalam Bahasa Indonesia, ringkas, dan sertakan angka konkret dari hasil \
 query — jangan mengarang angka.
 """
@@ -225,6 +249,14 @@ class TableauAgentSession:
             genai_types.Content(role="user", parts=[genai_types.Part(text=prompt_text)])
         )
 
+        start_time = time.monotonic()
+        prompt_tokens = 0
+        completion_tokens = 0
+        total_tokens = 0
+
+        def _elapsed_ms() -> int:
+            return int((time.monotonic() - start_time) * 1000)
+
         try:
             for _ in range(MAX_TOOL_LOOPS):
                 response = self.genai_client.models.generate_content(
@@ -235,6 +267,12 @@ class TableauAgentSession:
                         system_instruction=SYSTEM_INSTRUCTION,
                     ),
                 )
+
+                usage = getattr(response, "usage_metadata", None)
+                if usage is not None:
+                    prompt_tokens += getattr(usage, "prompt_token_count", None) or 0
+                    completion_tokens += getattr(usage, "candidates_token_count", None) or 0
+                    total_tokens += getattr(usage, "total_token_count", None) or 0
 
                 candidate = response.candidates[0]
                 self.chat_history.append(candidate.content)
@@ -247,7 +285,16 @@ class TableauAgentSession:
                     final_text = "".join(
                         part.text for part in candidate.content.parts if part.text
                     )
-                    yield {"type": "final", "text": final_text}
+                    yield {
+                        "type": "final",
+                        "text": final_text,
+                        "elapsed_ms": _elapsed_ms(),
+                        "tokens": {
+                            "prompt": prompt_tokens,
+                            "completion": completion_tokens,
+                            "total": total_tokens,
+                        },
+                    }
                     return
 
                 response_parts = []
@@ -281,7 +328,16 @@ class TableauAgentSession:
 
                 self.chat_history.append(genai_types.Content(role="user", parts=response_parts))
 
-            yield {"type": "final", "text": "(berhenti: terlalu banyak pemanggilan tool berturut-turut)"}
+            yield {
+                "type": "final",
+                "text": "(berhenti: terlalu banyak pemanggilan tool berturut-turut)",
+                "elapsed_ms": _elapsed_ms(),
+                "tokens": {
+                    "prompt": prompt_tokens,
+                    "completion": completion_tokens,
+                    "total": total_tokens,
+                },
+            }
 
         except Exception as exc:  # noqa: BLE001
             yield {"type": "error", "message": str(exc)}

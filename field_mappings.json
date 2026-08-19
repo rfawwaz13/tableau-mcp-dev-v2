@@ -1,0 +1,36 @@
+{
+  "_readme": [
+    "Panduan pemilihan FIELD untuk LLM, PER DATASOURCE. Menggantikan cara",
+    "lama (env var FIELD_HINTS di .env, yang cuma SATU aturan GLOBAL untuk",
+    "semua datasource -- itu salah begitu dashboard mulai memakai lebih dari",
+    "satu datasource dengan konvensi nama kolom berbeda). FIELD_HINTS di",
+    ".env SUDAH TIDAK DIBACA lagi oleh kode -- aman dihapus/diabaikan.",
+    "",
+    "File ini dibaca ULANG OTOMATIS oleh backend di setiap pesan chat --",
+    "edit & simpan kapan pun, TANPA perlu restart server.",
+    "",
+    "'per_datasource': key = nama datasource (LLM sendiri yang mencocokkan",
+    "  secara toleran ke nama asli saat membaca daftar datasource -- tidak",
+    "  perlu persis sama akhirannya, mis. tanpa/dengan ' Extract'),",
+    "  value = teks bebas panduan field untuk datasource itu SAJA (boleh",
+    "  sebut banyak field/istilah bisnis sekaligus dalam satu string).",
+    "",
+    "'global': panduan TAMBAHAN yang berlaku untuk SEMUA datasource",
+    "  (opsional, kosongkan kalau tidak perlu) -- ditambahkan SETELAH",
+    "  panduan per-datasource; kalau bertentangan, panduan per-datasource",
+    "  yang menang (LLM diinstruksikan begitu).",
+    "",
+    "Pola isian yang disarankan: sebutkan istilah bisnis (mis. 'sales',",
+    "'member') lalu field mana yang harus dipakai, DAN field mana yang harus",
+    "DIHINDARI kecuali pengguna eksplisit memintanya (mis. field berakhiran",
+    "'_all'/' All' untuk baris rollup/agregat, atau '_ly'/' Ly' untuk data",
+    "tahun lalu -- keduanya gampang tertukar karena namanya mirip)."
+  ],
+
+  "per_datasource": {
+    "temp_member_kpi_plu_dummy": "Untuk metrik 'sales'/'penjualan', SELALU gunakan field 'Mkpd Net'. JANGAN gunakan 'Net All' kecuali pengguna eksplisit menyebutnya secara spesifik — itu field berbeda (baris rollup/agregat) dan sering tertukar karena namanya mirip.",
+    "temp_alfagift_sales_dummy": "Untuk metrik 'sales'/'penjualan', gunakan field 'Sales Net'. gunakan 'Sales Net Ly' untuk komparasi tahun lalu. JANGAN gunakan 'Sales Net All' (baris rollup/agregat) kecuali pengguna eksplisit memintanya."
+  },
+
+  "global": ""
+}

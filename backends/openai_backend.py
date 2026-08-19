@@ -19,7 +19,8 @@ from openai import AsyncOpenAI
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
-from dashboard_filters import merge_dashboard_filters
+from dashboard_filters import datasource_in_scope, merge_dashboard_filters, parse_datasource_names
+from field_mappings import build_field_hints_block
 
 MODEL_NAME = os.environ.get("OPENAI_MODEL", "gpt-4.1")
 # backends/ ada satu level di bawah root proyek, tableau_mcp_server.py ada di root.
@@ -156,18 +157,19 @@ Jawab dalam Bahasa Indonesia, ringkas, dan sertakan angka konkret dari hasil \
 query — jangan mengarang angka.
 """
 
-# Panduan tambahan opsional dari admin (mis. field mana yang harus dipakai
-# untuk istilah bisnis tertentu, disiplin penamaan khusus datasource Anda,
-# dll). Isi FIELD_HINTS di .env kalau LLM sering salah pilih antar field
-# yang namanya mirip — tidak perlu ubah kode sama sekali untuk ini.
-#
-# Contoh isi FIELD_HINTS di .env:
-#   FIELD_HINTS="Untuk metrik 'sales'/'penjualan', SELALU gunakan field \
-#   'Mkpd Net'. JANGAN gunakan 'Net All' kecuali pengguna eksplisit \
-#   menyebutnya — itu field berbeda dan sering tertukar karena namanya mirip."
-_FIELD_HINTS = os.environ.get("FIELD_HINTS", "").strip()
-if _FIELD_HINTS:
-    SYSTEM_INSTRUCTION += f"\n\nPANDUAN FIELD KHUSUS DARI ADMIN (WAJIB DIIKUTI, MENGALAHKAN TEBAKANMU SENDIRI):\n{_FIELD_HINTS}\n"
+def _full_system_instruction() -> str:
+    """
+    Gabungkan SYSTEM_INSTRUCTION statis dengan panduan field PER DATASOURCE
+    dari field_mappings.json (lihat field_mappings.py) — dibaca ULANG setiap
+    dipanggil supaya admin bisa menambah/mengubah panduan datasource baru
+    tanpa restart server. Menggantikan mekanisme lama (env var FIELD_HINTS
+    di .env, yang cuma satu aturan global untuk SEMUA datasource — salah
+    begitu ada lebih dari satu konvensi penamaan kolom).
+    """
+    hints = build_field_hints_block()
+    if not hints:
+        return SYSTEM_INSTRUCTION
+    return f"{SYSTEM_INSTRUCTION}\n\n{hints}\n"
 
 
 def _mcp_tools_to_openai_tools(mcp_tools: list) -> list[dict]:
@@ -202,6 +204,10 @@ class TableauAgentSession:
         self.exit_stack = AsyncExitStack()
         self.openai_tools: list[dict] = []
         self.messages: list[dict] = [{"role": "system", "content": SYSTEM_INSTRUCTION}]
+        # datasourceLuid -> nama datasource, diisi dari hasil tool
+        # list_datasources setiap kali dipanggil di sesi ini. Dipakai untuk
+        # men-scope filter dashboard per-datasource, lihat dashboard_filters.py.
+        self._datasource_names: dict[str, str] = {}
 
     async def connect(self) -> list[str]:
         server_params = StdioServerParameters(
@@ -223,9 +229,18 @@ class TableauAgentSession:
         user_message: str,
         dashboard_context: str = "",
         dashboard_filters: list[dict] | None = None,
+        dashboard_datasources: list[str] | None = None,
     ) -> AsyncIterator[dict]:
         assert self.session is not None, "Panggil connect() sebelum ask_stream()"
         dashboard_filters = dashboard_filters or []
+        dashboard_datasources = dashboard_datasources or []
+
+        # Refresh pesan system SETIAP giliran chat (bukan cuma sekali di
+        # __init__) supaya perubahan field_mappings.json langsung kepakai
+        # tanpa perlu koneksi WebSocket baru/restart server. self.messages[0]
+        # dijamin tetap pesan system karena hanya operasi append yang terjadi
+        # di tempat lain pada list ini.
+        self.messages[0]["content"] = _full_system_instruction()
 
         if dashboard_context:
             prompt_text = (
@@ -285,20 +300,59 @@ class TableauAgentSession:
                     except json.JSONDecodeError:
                         args = {}
 
-                    # Paksa terapkan filter dashboard ke SETIAP panggilan
-                    # query_datasource, DAN sanitasi semua nilai filter (buang null/objek
-                    # tidak valid) — apa pun yang disusun LLM sendiri.
+                    reject_call = False
+
                     if name == "query_datasource":
-                        args["query_json"] = merge_dashboard_filters(
-                            args.get("query_json", "{}"), dashboard_filters
-                        )
+                        target_name = self._datasource_names.get(args.get("datasource_luid"))
+
+                        # Jaring pengaman DETERMINISTIK terhadap LLM yang keliru
+                        # memilih datasourceLuid dari GILIRAN CHAT SEBELUMNYA (mis.
+                        # riwayat percakapan masih menyimpan datasourceLuid dari
+                        # saat pengguna berada di sub-page/dashboard lain sebelum
+                        # berpindah) -- instruksi lewat prompt saja terbukti tidak
+                        # selalu cukup diandalkan untuk kasus ini. Kalau di luar
+                        # scope, JANGAN eksekusi query sungguhan -- balikkan error
+                        # yang memaksa LLM koreksi diri (panggil list_datasources
+                        # lagi, pilih datasourceLuid yang benar).
+                        if not datasource_in_scope(target_name, dashboard_datasources):
+                            reject_call = True
+                            result_text = (
+                                f"ERROR: datasource_luid ini menunjuk ke datasource "
+                                f"'{target_name or args.get('datasource_luid')}', TAPI dashboard/halaman "
+                                f"yang sedang aktif SEKARANG hanya mengizinkan: "
+                                f"{', '.join(dashboard_datasources)}. Panggil list_datasources (kalau "
+                                f"belum di giliran chat ini) untuk mencocokkan nama itu ke "
+                                f"datasourceLuid yang BENAR, lalu ulangi query_datasource dengan "
+                                f"datasourceLuid yang sesuai. JANGAN pakai datasourceLuid ini lagi untuk "
+                                f"pertanyaan tentang halaman ini."
+                            )
+                            print(
+                                f"[openai_backend] query_datasource DITOLAK: target "
+                                f"'{target_name}' di luar scope dashboard saat ini {dashboard_datasources}"
+                            )
+                        else:
+                            # Paksa terapkan filter dashboard ke SETIAP panggilan
+                            # query_datasource, DAN sanitasi semua nilai filter (buang
+                            # null/objek tidak valid) — apa pun yang disusun LLM sendiri.
+                            # target_name di-resolve dari cache _datasource_names supaya
+                            # filter yang ditag sourceDatasources hanya dipaksakan ke
+                            # datasource yang benar-benar cocok (lihat dashboard_filters.py).
+                            args["query_json"] = merge_dashboard_filters(
+                                args.get("query_json", "{}"),
+                                dashboard_filters,
+                                target_datasource_name=target_name,
+                            )
 
                     yield {"type": "tool_call", "name": name, "args": args}
 
-                    result = await self.session.call_tool(name, args)
-                    result_text = "\n".join(
-                        block.text for block in result.content if hasattr(block, "text")
-                    )
+                    if not reject_call:
+                        result = await self.session.call_tool(name, args)
+                        result_text = "\n".join(
+                            block.text for block in result.content if hasattr(block, "text")
+                        )
+
+                        if name == "list_datasources":
+                            self._datasource_names.update(parse_datasource_names(result_text))
 
                     yield {"type": "tool_result", "name": name, "result": result_text}
 

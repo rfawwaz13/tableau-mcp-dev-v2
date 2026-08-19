@@ -191,8 +191,6 @@ function connect() {
   ws.onerror = () => ws.close();
 }
 
-let hasSentFirstMessage = false;
-
 async function submitMessage() {
   const text = input.value.trim();
   if (!text || ws.readyState !== WebSocket.OPEN) return;
@@ -204,22 +202,33 @@ async function submitMessage() {
   suggestionsBox.innerHTML = "";
   showThinking();
 
-  // PESAN PERTAMA dalam sesi ini: JANGAN percaya cache sama sekali (walau
-  // stale === false), paksa baca ulang langsung dari dashboard. Ini jaring
-  // pengaman terhadap race condition di awal load — snapshot pertama saat
-  // extension baru dimuat kadang belum mencerminkan state final Tableau
-  // (lihat catch-up read di tableau-extension.js), jadi demi akurasi di
-  // interaksi paling penting ini, kita tidak ambil risiko pakai cache.
-  if (!hasSentFirstMessage && window.__isTableauExtension) {
+  // SELALU paksa baca ulang konteks dashboard SUNGGUHAN sebelum TIAP pesan
+  // dikirim — JANGAN percaya flag "stale" di sini sama sekali (beda dari
+  // pemakaian __dashboardContextStale di tempat lain, mis. badge UI, yang
+  // memang boleh mengandalkan flag itu).
+  //
+  // Alasan: Tableau Extensions API TIDAK punya event untuk mendeteksi
+  // pengguna berpindah SUB-PAGE/tab di dalam satu dashboard (pola umum:
+  // tombol Show/Hide Container yang menukar worksheet/datasource yang
+  // ditampilkan). FilterChanged/ParameterChanged HANYA terpicu kalau nilai
+  // filter/parameter sungguhan berubah — bukan saat container disembunyikan/
+  // ditampilkan. Kalau kita mengandalkan flag stale di titik pengiriman
+  // pesan, pengguna yang pindah sub-page (mis. dari "Sales" ke
+  // "Sales Online", yang datasource-nya berbeda) lalu langsung bertanya
+  // akan tetap dapat CONTEXT LAMA (termasuk daftar datasource & filter dari
+  // sub-page sebelumnya) — itu penyebab agent salah tarik datasource.
+  //
+  // Baca ulang tepat di sini (sesaat sebelum kirim, bukan reaktif terhadap
+  // event) murah dan aman dari resource contention: pengguna baru selesai
+  // mengetik + klik kirim, jadi dashboard biasanya sudah selesai re-render
+  // apa pun sebelumnya.
+  if (window.__isTableauExtension) {
     window.__dashboardContextStale = true;
   }
-  hasSentFirstMessage = true;
 
   // Baca filter dashboard SEKARANG, tepat sebelum dikirim — bukan pakai
-  // nilai yang sudah basi dari saat extension pertama dimuat. Kalau tidak
-  // ada perubahan filter sejak terakhir dibaca (window.__dashboardContextStale
-  // === false), ini langsung return cache tanpa panggilan API apa pun.
-  if (window.__dashboardContextStale && !contextRow.hidden) setSyncState("syncing");
+  // nilai yang sudah basi dari sub-page/pertanyaan sebelumnya.
+  if (!contextRow.hidden) setSyncState("syncing");
   const context =
     typeof window.__ensureFreshDashboardContext === "function"
       ? await window.__ensureFreshDashboardContext()
@@ -236,6 +245,11 @@ async function submitMessage() {
       // siap-pakai) — backend akan MEMAKSA menerapkan ini ke setiap
       // query_datasource, tidak bergantung pada LLM menerjemahkan teks.
       context_filters: context.filters || [],
+      // Nama datasource yang benar-benar dipakai worksheet yang visible
+      // SEKARANG — backend akan MENOLAK query_datasource yang menyasar
+      // datasource di luar daftar ini (mis. sisa riwayat chat dari
+      // sub-page sebelumnya), bukan cuma mengandalkan instruksi prompt.
+      context_datasources: context.datasourceNames || [],
     })
   );
 }

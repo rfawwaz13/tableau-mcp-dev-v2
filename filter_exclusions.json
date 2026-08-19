@@ -1,0 +1,59 @@
+{
+  "_readme": [
+    "Konfigurasi untuk MENGECUALIKAN filter/parameter dashboard tertentu",
+    "supaya TIDAK dipaksakan oleh sistem ke query_datasource. File ini",
+    "dibaca ULANG OTOMATIS oleh backend setiap kali agent menjalankan query",
+    "-- edit & simpan kapan pun, TANPA perlu restart server atau ubah kode.",
+    "",
+    "Nama field di bawah harus PERSIS SAMA dengan fieldCaption yang dipakai",
+    "Tableau (lihat baris 'Filter: ...' di teks konteks dashboard yang",
+    "dikirim ke chat, atau panggil tool get_datasource_metadata). Untuk",
+    "filter yang asalnya dari PARAMETER (bukan filter card biasa), tulis",
+    "nama FIELD TARGET-nya (hasil PARAMETER_FIELD_MAP di",
+    "static/tableau-extension.js), BUKAN nama parameter itu sendiri --",
+    "mis. kalau parameter 'P.Branch List' dipetakan ke field",
+    "'Mkpd Branch Name', tulis 'Mkpd Branch Name' di sini.",
+    "",
+    "Tiap entry field di 'global'/'per_datasource' boleh berupa:",
+    "  - STRING biasa, mis. \"Sources\" -> field ini dikecualikan TOTAL, apa",
+    "    pun nilai yang sedang dipilih di dashboard. Cocok untuk field yang",
+    "    memang tidak relevan sama sekali untuk datasource ini.",
+    "  - OBJEK { \"field\": \"Kota\", \"when_values_include\": [\"ALL\"] } ->",
+    "    dikecualikan HANYA kalau nilai yang sedang dipilih termasuk salah",
+    "    satu di 'when_values_include'. Kalau pengguna mengubah filter itu",
+    "    ke nilai lain (mis. 'Jakarta'), filter TETAP dipaksakan seperti",
+    "    biasa -- ini presisi, dipakai untuk field yang punya konvensi",
+    "    literal 'ALL' (rollup CUBE) di SATU datasource tapi TIDAK berlaku",
+    "    di datasource lain, supaya kita cuma skip nilai 'ALL'-nya saja,",
+    "    bukan mematikan field itu selamanya.",
+    "",
+    "'global': entry di sini berlaku untuk SEMUA datasource, apa pun yang",
+    "  sedang di-query.",
+    "",
+    "'per_datasource': entry di sini berlaku HANYA untuk datasource dengan",
+    "  nama itu (pencocokan nama toleran -- boleh beda akhiran, mis.",
+    "  'temp_alfagift_sales_dummy' vs 'temp_alfagift_sales_dummy Extract'",
+    "  tetap dianggap cocok).",
+    "",
+    "'skip_all_dashboard_filters_for_datasource': nama datasource di sini",
+    "  SAMA SEKALI TIDAK akan menerima filter dashboard yang dipaksakan --",
+    "  LLM tetap bebas menambah filter sendiri kalau diminta pengguna.",
+    "  Berguna untuk isolasi cepat saat debug 0-baris: masukkan nama",
+    "  datasource yang bermasalah ke sini dulu untuk memastikan apakah",
+    "  akar masalahnya memang dari filter yang dipaksakan atau dari hal",
+    "  lain -- baru setelah itu persempit ke field spesifik lewat",
+    "  'per_datasource' di atas."
+  ],
+
+  "global": [],
+
+  "per_datasource": {
+    "temp_alfagift_sales_dummy": [
+      "Sources",
+      "New Sources",
+      "Jenis Pembelian"
+    ]
+  },
+
+  "skip_all_dashboard_filters_for_datasource": []
+}

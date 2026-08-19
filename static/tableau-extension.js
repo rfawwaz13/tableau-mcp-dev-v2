@@ -11,6 +11,11 @@
  *   3. Menyimpan:
  *        - window.__dashboardContext        (string, untuk badge & prompt)
  *        - window.__dashboardFilters        (array objek VDS, untuk backend)
+ *        - window.__dashboardDatasources    (array nama datasource yang
+ *          BENAR-BENAR dipakai worksheet yang visible SEKARANG, dikirim ke
+ *          backend supaya query_datasource yang menyasar datasource DI LUAR
+ *          daftar ini bisa ditolak deterministik -- lihat
+ *          dashboard_filters.py::datasource_in_scope)
  *   4. Mendengarkan perubahan filter, lalu memancarkan event
  *      "dashboardContextUpdated" supaya app.js bisa memperbarui badge UI
  *      dan mengirim ulang window.__dashboardFilters ke backend.
@@ -23,6 +28,7 @@
 
 window.__dashboardContext = "";
 window.__dashboardFilters = [];
+window.__dashboardDatasources = [];
 window.__isTableauExtension = false;
 
 // ---------------------------------------------------------------------
@@ -88,13 +94,41 @@ const EXCLUDED_FILTER_FIELDS = new Set(["Branch Change", "Mkpd Branch"]);
 // jarang di-render), kita TIDAK menunggu tanpa batas — anggap saja
 // worksheet itu "tidak berkontribusi filter" untuk request ini, daripada
 // membuat seluruh proses menggantung berpuluh detik/menit.
-const WORKSHEET_FETCH_TIMEOUT_MS = 60000;
+//
+// Diturunkan dari 60000 -> 15000: 60 detik terlalu lama untuk API yang
+// seharusnya instan (kalau genuinely macet, pengguna sudah lama menunggu
+// SEBELUM pesan chat-nya bahkan terkirim) — turunkan supaya gagal LEBIH
+// CEPAT dan kelihatan (lihat log warning di withTimeout di bawah), bukan
+// diam-diam menunggu semenit penuh baru fallback ke [] tanpa jejak apa pun.
+const WORKSHEET_FETCH_TIMEOUT_MS = 15000;
 
-function withTimeout(promise, ms, fallbackValue) {
+/**
+ * `label` (opsional) dipakai untuk mencatat log WARNING kalau cabang
+ * timeout yang menang (bukan promise aslinya) — sebelumnya SENYAP TOTAL
+ * (tidak ada log apa pun saat fallback terpakai), sehingga kalau
+ * getDataSourcesAsync()/getFiltersAsync() genuinely macet/lambat untuk
+ * suatu worksheet, tidak ada jejak sama sekali untuk didiagnosis. Sekarang
+ * kalau ini terjadi, akan langsung terlihat di console browser.
+ */
+function withTimeout(promise, ms, fallbackValue, label) {
+  let timedOut = false;
   return Promise.race([
     promise,
-    new Promise((resolve) => setTimeout(() => resolve(fallbackValue), ms)),
-  ]);
+    new Promise((resolve) =>
+      setTimeout(() => {
+        timedOut = true;
+        resolve(fallbackValue);
+      }, ms)
+    ),
+  ]).then((result) => {
+    if (timedOut) {
+      console.warn(
+        `[tableau-extension] TIMEOUT (${ms}ms) menunggu ${label || "operasi Tableau API"} -- ` +
+          `memakai fallback kosong. Kalau ini sering muncul, ada worksheet/koneksi yang genuinely lambat/macet.`
+      );
+    }
+    return result;
+  });
 }
 
 /**
@@ -108,7 +142,12 @@ async function collectParameterFilters(dashboard) {
   const results = [];
   let parameters = [];
   try {
-    parameters = await withTimeout(dashboard.getParametersAsync(), WORKSHEET_FETCH_TIMEOUT_MS, []);
+    parameters = await withTimeout(
+      dashboard.getParametersAsync(),
+      WORKSHEET_FETCH_TIMEOUT_MS,
+      [],
+      "getParametersAsync (dashboard)"
+    );
   } catch (err) {
     console.warn("[tableau-extension] Gagal membaca parameters:", err);
     return results;
@@ -185,42 +224,13 @@ function getVisibleWorksheets(dashboard) {
   }
 }
 
-// Nama-nama datasource yang benar-benar dipakai dashboard ini, dikumpulkan
-// sekali saat init (tidak berubah saat filter di-ubah, jadi tidak perlu
-// di-refetch tiap kali seperti filter).
+// Nama-nama datasource yang dipakai worksheet yang SEDANG VISIBLE. Diisi
+// ULANG setiap kali buildDashboardState() jalan (BUKAN sekali di init) —
+// dashboard dengan sub-page/tab yang masing-masing memakai datasource
+// berbeda (mis. "All"/"Offline" vs "Online") butuh ini tetap akurat
+// mengikuti sub-page mana yang sedang aktif, bukan nyangkut ke datasource
+// sub-page pertama yang kebetulan aktif saat extension pertama dimuat.
 let cachedDatasourceNames = [];
-
-/**
- * Kumpulkan nama SEMUA datasource yang dipakai oleh worksheet mana pun di
- * dashboard ini (bisa lebih dari satu worksheet memakai datasource yang
- * sama -> di-dedupe). Ini yang dipakai untuk MEMBATASI scope agent supaya
- * tidak query datasource lain di server yang tidak relevan dengan
- * dashboard yang sedang ditampilkan.
- */
-async function collectDashboardDatasourceNames(dashboard) {
-  const names = new Set();
-  const worksheets = getVisibleWorksheets(dashboard);
-
-  // Promise.all, BUKAN for...of sequential -> semua worksheet di-fetch
-  // BERSAMAAN, bukan satu-satu menunggu yang sebelumnya selesai. Untuk
-  // dashboard dengan banyak worksheet, ini bisa >10x lebih cepat.
-  await Promise.all(
-    worksheets.map(async (worksheet) => {
-      try {
-        const datasources = await withTimeout(
-          worksheet.getDataSourcesAsync(),
-          WORKSHEET_FETCH_TIMEOUT_MS,
-          []
-        );
-        datasources.forEach((ds) => names.add(ds.name));
-      } catch (err) {
-        console.warn(`Gagal membaca datasource worksheet "${worksheet.name}":`, err);
-      }
-    })
-  );
-
-  return Array.from(names);
-}
 
 /**
  * Interpretasi SATU objek Filter Tableau jadi DUA representasi sekaligus:
@@ -438,38 +448,87 @@ async function buildDashboardState() {
   // beda sendiri).
   const fieldValueVotes = new Map(); // fieldCaption -> Map<serializedValue, {vds, count, worksheets: []}>
 
+  // Datasource ASAL tiap field (union nama datasource dari semua worksheet
+  // yang berkontribusi filter untuk field ini) — dipakai untuk men-tag
+  // tiap filter dengan `sourceDatasources`, supaya backend HANYA
+  // memaksakan filter ini ke query_datasource yang benar-benar menyasar
+  // datasource yang sama (lihat dashboard_filters.py). Ini mencegah filter
+  // dengan konvensi nilai spesifik ke SATU datasource (mis. literal "ALL"
+  // untuk datasource ber-CUBE) "bocor" ke datasource lain yang skemanya
+  // berbeda (mis. sub-page "Online" yang bukan CUBE) dan menghasilkan 0 baris.
+  const fieldDatasources = new Map(); // fieldCaption -> Set<datasourceName>
+
   const worksheets = getVisibleWorksheets(dashboard);
 
-  // Promise.all, BUKAN for...of sequential -> getFiltersAsync() untuk semua
-  // worksheet dipanggil BERSAMAAN. Dengan banyak worksheet, loop sequential
-  // sebelumnya jadi penyumbang utama lag saat filter diubah (worksheet ke-N
-  // baru mulai di-fetch setelah worksheet ke-(N-1) selesai). Timeout per
-  // worksheet mencegah SATU worksheet lambat (mis. tersembunyi/jarang
-  // di-render) menahan seluruh proses berpuluh detik.
+  // Promise.all, BUKAN for...of sequential -> getFiltersAsync()/
+  // getDataSourcesAsync() untuk semua worksheet dipanggil BERSAMAAN. Dengan
+  // banyak worksheet, loop sequential sebelumnya jadi penyumbang utama lag
+  // saat filter diubah (worksheet ke-N baru mulai di-fetch setelah
+  // worksheet ke-(N-1) selesai). Timeout per worksheet mencegah SATU
+  // worksheet lambat (mis. tersembunyi/jarang di-render) menahan seluruh
+  // proses berpuluh detik.
   const perWorksheetResults = await Promise.all(
     worksheets.map(async (worksheet) => {
       let filters = [];
       try {
-        filters = await withTimeout(worksheet.getFiltersAsync(), WORKSHEET_FETCH_TIMEOUT_MS, null);
+        filters = await withTimeout(
+          worksheet.getFiltersAsync(),
+          WORKSHEET_FETCH_TIMEOUT_MS,
+          null,
+          `getFiltersAsync worksheet "${worksheet.name}"`
+        );
         if (filters === null) {
           console.warn(`[tableau-extension] Timeout membaca filter worksheet "${worksheet.name}", dilewati.`);
           filters = [];
         }
       } catch (err) {
         console.warn(`Gagal membaca filter worksheet "${worksheet.name}":`, err);
-        return { worksheetName: worksheet.name, interpreted: [] };
+        filters = [];
       }
+
+      let datasourceNames = [];
+      try {
+        const datasources = await withTimeout(
+          worksheet.getDataSourcesAsync(),
+          WORKSHEET_FETCH_TIMEOUT_MS,
+          [],
+          `getDataSourcesAsync worksheet "${worksheet.name}"`
+        );
+        datasourceNames = datasources.map((ds) => ds.name);
+        if (datasourceNames.length === 0) {
+          console.warn(
+            `[tableau-extension] getDataSourcesAsync() untuk worksheet "${worksheet.name}" ` +
+              `mengembalikan 0 datasource (bukan timeout -- ini hasil ASLI dari Tableau). ` +
+              `Kalau worksheet ini seharusnya punya datasource, ini yang menyebabkan baris ` +
+              `"Datasource: ..." hilang dari konteks.`
+          );
+        }
+      } catch (err) {
+        console.warn(`Gagal membaca datasource worksheet "${worksheet.name}":`, err);
+      }
+
       const interpreted = filters.map(interpretFilter).filter((f) => f !== null);
-      return { worksheetName: worksheet.name, interpreted };
+      return { worksheetName: worksheet.name, interpreted, datasourceNames };
     })
   );
+
+  // cachedDatasourceNames dihitung ULANG di sini setiap kali (BUKAN sekali
+  // di init) — union datasource dari worksheet yang SEDANG visible, supaya
+  // tetap akurat kalau pengguna pindah sub-page/tab yang memakai datasource
+  // berbeda (dipicu ulang lewat event FilterChanged/ParameterChanged dari
+  // mekanisme swap sub-page yang menandai context basi).
+  const datasourceNameSet = new Set();
+  perWorksheetResults.forEach(({ datasourceNames }) => {
+    datasourceNames.forEach((n) => datasourceNameSet.add(n));
+  });
+  cachedDatasourceNames = Array.from(datasourceNameSet);
 
   // Teks tampilan per field (untuk transparansi di badge/prompt) — HANYA
   // untuk display, bukan otoritatif untuk filtering (itu tugas
   // fieldValueVotes/vdsFiltersByField di bawah).
   const fieldDisplayText = new Map();
 
-  for (const { interpreted } of perWorksheetResults) {
+  for (const { interpreted, datasourceNames } of perWorksheetResults) {
     if (interpreted.length === 0) continue;
 
     interpreted.forEach((f) => {
@@ -490,10 +549,21 @@ async function buildDashboardState() {
         votesForField.set(serialized, { vds: f.vds, count: 0 });
       }
       votesForField.get(serialized).count += 1;
+
+      if (!fieldDatasources.has(fieldCaption)) {
+        fieldDatasources.set(fieldCaption, new Set());
+      }
+      const dsSet = fieldDatasources.get(fieldCaption);
+      datasourceNames.forEach((n) => dsSet.add(n));
     });
   }
 
-  console.debug(`[tableau-extension] ${worksheets.length} worksheet visible dibaca`);
+  console.debug(
+    `[tableau-extension] ${worksheets.length} worksheet visible dibaca:`,
+    worksheets.map((ws) => ws.name),
+    "-- per-worksheet datasource:",
+    perWorksheetResults.map((r) => ({ worksheet: r.worksheetName, datasources: r.datasourceNames }))
+  );
 
   // Untuk tiap field, pilih nilai yang paling sering muncul (mayoritas) di
   // seluruh worksheet VISIBLE sebagai filter yang DIPAKSA-terapkan. Field
@@ -506,7 +576,12 @@ async function buildDashboardState() {
   for (const [fieldCaption, votesForField] of fieldValueVotes) {
     const entries = Array.from(votesForField.values());
     entries.sort((a, b) => b.count - a.count);
-    vdsFiltersByField.set(fieldCaption, entries[0].vds);
+    const vds = entries[0].vds;
+    // sourceDatasources kosong/null berarti "berlaku untuk semua datasource"
+    // (fail-open) — lihat _filter_applies_to_datasource di dashboard_filters.py.
+    const datasourceNames = Array.from(fieldDatasources.get(fieldCaption) || []);
+    vds.sourceDatasources = datasourceNames.length > 0 ? datasourceNames : null;
+    vdsFiltersByField.set(fieldCaption, vds);
     if (entries.length > 1) {
       conflictNotes.push(`${fieldCaption} (nilai tidak konsisten antar-worksheet, dipakai yang mayoritas)`);
     }
@@ -517,11 +592,16 @@ async function buildDashboardState() {
   // dipetakan lewat PARAMETER_FIELD_MAP: menimpa hasil voting filter biasa
   // kalau kebetulan menyasar field yang sama, karena parameter cuma punya
   // SATU sumber nilai per dashboard (tidak ada konsep "mayoritas worksheet"
-  // yang relevan untuknya).
+  // yang relevan untuknya). Parameter levelnya WORKBOOK, bukan per-worksheet,
+  // jadi TIDAK diikat ke datasource tertentu (sourceDatasources dibiarkan
+  // null/broadcast) — kalau field targetnya tidak ada di suatu datasource,
+  // itu sudah ditangani terpisah oleh proactive field-check di
+  // tableau_client.py (field dibuang otomatis + dicatat ke pengguna).
   const parameterFilters = await collectParameterFilters(dashboard);
   for (const p of parameterFilters) {
     allFilterFieldsSeen.add(p.field);
     fieldDisplayText.set(p.field, p.text);
+    p.vds.sourceDatasources = null;
     vdsFiltersByField.set(p.vds.field.fieldCaption, p.vds);
   }
 
@@ -560,6 +640,7 @@ async function buildDashboardState() {
   return {
     contextText,
     dashboardFilters: Array.from(vdsFiltersByField.values()),
+    datasourceNames: cachedDatasourceNames,
     totalFilterCount: allFilterFieldsSeen.size,
     appliedFilterCount: vdsFiltersByField.size,
   };
@@ -571,25 +652,34 @@ async function refreshContext() {
     const state = await buildDashboardState();
     window.__dashboardContext = state.contextText;
     window.__dashboardFilters = state.dashboardFilters;
+    window.__dashboardDatasources = state.datasourceNames;
     totalFilterCount = state.totalFilterCount;
   } catch (err) {
     console.error("Gagal membaca konteks dashboard:", err);
     window.__dashboardContext = "";
     window.__dashboardFilters = [];
+    window.__dashboardDatasources = [];
   }
   window.__dashboardContextStale = false;
   console.debug("[tableau-extension] konteks diperbarui:", window.__dashboardContext);
   console.debug("[tableau-extension] filter VDS siap-pakai:", window.__dashboardFilters);
+  console.debug("[tableau-extension] datasource scope saat ini:", window.__dashboardDatasources);
   window.dispatchEvent(
     new CustomEvent("dashboardContextUpdated", {
       detail: {
         text: window.__dashboardContext,
         filters: window.__dashboardFilters,
+        datasourceNames: window.__dashboardDatasources,
         totalFilterCount,
       },
     })
   );
-  return { text: window.__dashboardContext, filters: window.__dashboardFilters, totalFilterCount };
+  return {
+    text: window.__dashboardContext,
+    filters: window.__dashboardFilters,
+    datasourceNames: window.__dashboardDatasources,
+    totalFilterCount,
+  };
 }
 
 // ---------------------------------------------------------------------
@@ -635,12 +725,13 @@ function markDashboardContextStale() {
  */
 window.__ensureFreshDashboardContext = async function () {
   if (!window.__isTableauExtension) {
-    return { text: "", filters: [], totalFilterCount: 0 };
+    return { text: "", filters: [], datasourceNames: [], totalFilterCount: 0 };
   }
   if (!window.__dashboardContextStale) {
     return {
       text: window.__dashboardContext,
       filters: window.__dashboardFilters,
+      datasourceNames: window.__dashboardDatasources,
       totalFilterCount: window.__dashboardContext ? undefined : 0,
     };
   }
@@ -660,15 +751,16 @@ async function initTableauExtension() {
 
   const dashboard = tableau.extensions.dashboardContent.dashboard;
 
-  // Datasource yang dipakai dashboard hampir tidak pernah berubah selama
-  // sesi berjalan (beda dengan filter), jadi cukup dibaca sekali di awal.
-  cachedDatasourceNames = await collectDashboardDatasourceNames(dashboard);
-  console.debug("[tableau-extension] datasource dashboard:", cachedDatasourceNames);
-
+  // cachedDatasourceNames dihitung di dalam buildDashboardState() (dipanggil
+  // oleh refreshContext() di bawah), dan dihitung ULANG setiap refresh —
+  // bukan cuma sekali di init — supaya tetap akurat kalau dashboard punya
+  // beberapa sub-page/tab yang memakai datasource berbeda-beda.
+  //
   // Baca sekali di awal (dashboard belum sibuk re-render apa pun saat baru
   // dimuat, jadi tidak ada resource contention di titik ini) supaya badge
   // langsung terisi begitu extension tampil.
   await refreshContext();
+  console.debug("[tableau-extension] datasource dashboard:", cachedDatasourceNames);
 
   // CATCH-UP READ: dashboard yang baru dimuat kadang belum benar-benar
   // "settle" persis di momen initializeAsync() resolve (mis. state filter/

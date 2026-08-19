@@ -4,7 +4,7 @@
     {
       "name": "tableau-assistant",
       "runtimeExecutable": ".venv/Scripts/uvicorn.exe",
-      "runtimeArgs": ["web_app:app", "--host", "127.0.0.1", "--port", "8000"],
+      "runtimeArgs": ["web_app:app", "--host", "127.0.0.1", "--port", "8000", "--timeout-graceful-shutdown", "10"],
       "port": 8000
     }
   ]

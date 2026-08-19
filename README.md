@@ -77,9 +77,11 @@ python gemini_client.py
 
 **b) Web app (untuk di-embed ke dashboard):**
 ```bash
-uvicorn web_app:app --host 0.0.0.0 --port 8000 --reload
+uvicorn web_app:app --host 0.0.0.0 --port 8000 --reload --timeout-graceful-shutdown 10
 ```
 Buka `http://localhost:8000` — chat box siap dipakai. Setiap tab browser = satu sesi percakapan independen (satu `TableauAgentSession` per koneksi WebSocket).
+
+> `--timeout-graceful-shutdown 10`: batas waktu (detik) server menunggu koneksi WebSocket yang masih aktif sebelum dipaksa berhenti saat Ctrl+C. Tanpa ini, kalau ada tab browser/dashboard yang masih terbuka, uvicorn bisa macet tanpa batas di pesan "Waiting for background tasks to complete". `--reload` menjalankan uvicorn lewat proses supervisor (mengawasi perubahan file) + proses worker terpisah — normal kalau Anda melihat dua `python.exe` di Task Manager selama server berjalan.
 
 ## 4. Meng-embed ke dashboard Tableau
 

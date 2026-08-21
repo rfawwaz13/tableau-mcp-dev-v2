@@ -66,28 +66,157 @@ window.__isTableauExtension = false;
 // const PARAMETER_FIELD_MAP = {};
 const PARAMETER_FIELD_MAP = {
   "P.Branch List": "Mkpd Branch Name",
+  "P.Remark Online": "Mkpd Online",
 };
 
 // ---------------------------------------------------------------------
-// FIELD FILTER YANG DIKECUALIKAN dari force-apply ke query_datasource.
+// PETA NILAI MENTAH PARAMETER -> NILAI SEBENARNYA DI KOLOM TARGET.
 //
-// Isi dengan nama calculated field boolean GATE yang dibangun dari
-// parameter (contoh di atas: "Branch Change"). Field seperti ini muncul
-// sebagai filter worksheet biasa (mis. "Branch Change = True") tapi
-// TIDAK BOLEH ikut dipaksakan ke query bersamaan dengan filter dari
-// PARAMETER_FIELD_MAP — karena VDS mengevaluasinya pakai nilai parameter
-// PUBLISHED/default (bukan live), yang bisa BERTENTANGAN dengan filter
-// target yang benar (mis. "Branch Change=True" tersirat "Mkpd Branch Name
-// = ALL" kalau default parameter-nya "ALL", padahal Anda sedang pilih
-// "CIKOKOL" — dikombinasikan, hasilnya NOL baris).
+// Beberapa parameter Tableau memakai KODE ANGKA (mis. 1/2/3) sebagai nilai
+// MENTAH-nya, padahal yang ditampilkan ke pengguna di UI Tableau adalah
+// label lewat calculated field/alias (mis. "ALL"/"OFFLINE"/"ONLINE").
+// param.currentValue.value SELALU nilai MENTAH (bukan label yang tampil)
+// -- kalau kolom TARGET di datasource sebenarnya berisi STRING label itu
+// (bukan angka kodenya), memaksakan filter dengan nilai mentah (1/2/3)
+// TIDAK PERNAH cocok dengan isi kolom -> hasilnya 0 baris, meski nama
+// field & scope datasource-nya sudah benar.
 //
-// Field ini TETAP ditampilkan di teks konteks (transparansi), TAPI tidak
-// pernah dikirim sebagai filter VDS sungguhan.
+// Isi di sini kalau menemukan kasus begini: key = nama parameter (SAMA
+// PERSIS seperti di PARAMETER_FIELD_MAP), value = objek {nilai_mentah:
+// "label_yang_benar_di_kolom"}. Kalau parameter tidak terdaftar di sini,
+// nilai mentahnya dipakai apa adanya (perilaku lama, tidak berubah).
 //
-//   const EXCLUDED_FILTER_FIELDS = new Set(["Branch Change"]);
+// const PARAMETER_VALUE_MAP = {};
+const PARAMETER_VALUE_MAP = {
+  "P.Remark Online": { 1: "ALL", 2: "OFFLINE", 3: "ONLINE" },
+};
+
+// ---------------------------------------------------------------------
+// TABLEAU DATE-PART WRAPPER (bawaan Tableau, generik untuk SEMUA field).
 //
-// const EXCLUDED_FILTER_FIELDS = new Set([]);
-const EXCLUDED_FILTER_FIELDS = new Set(["Branch Change", "Mkpd Branch"]);
+// Kalau sebuah filter di UI Tableau didiskritkan ke granularitas tertentu
+// (mis. dropdown "Month/Year" di filter shelf), Extensions API melaporkan
+// `filter.fieldName` BUKAN nama kolom asli, tapi dibungkus sintaks internal
+// Tableau seperti "MY(Mkpd Period)" (MY = Month/Year). Dua konsekuensi:
+//   1. appliedValues.value untuk filter semacam ini SELALU teks tampilan
+//      (mis. "February 2024"), TIDAK PERNAH objek Date — field yang
+//      genuinely bertipe tanggal MENTAH (tanpa wrapper) sudah ditangani
+//      otomatis lewat cabang `instanceof Date` di buildSetOrDateFilter().
+//   2. "MY(Mkpd Period)" itu sendiri BUKAN nama kolom yang valid untuk
+//      dikirim ke VizQL Data Service — kolom aslinya adalah "Mkpd Period"
+//      (isi di dalam kurung), jadi WAJIB di-unwrap sebelum jadi fieldCaption
+//      di query, apa pun hasil parsing nilainya (berhasil ATAU fallback).
+//
+// Ditangani GENERIK di sini (bukan per-nama-field, beda dari DATE_TEXT_FIELDS
+// di bawah) karena "MY(...)" adalah konvensi BAWAAN Tableau — berlaku untuk
+// field APA PUN yang kebetulan difilter dengan granularitas Month/Year,
+// tidak perlu didaftarkan satu-satu tiap ditemukan field baru.
+//
+// Tambahkan prefix baru di sini kalau suatu saat menemukan wrapper Tableau
+// lain (mis. "QY" untuk Quarter/Year) — perlu format parser barunya juga di
+// parseDateTextValue().
+//
+// CATATAN: nilai MENTAH (appliedValues[].value) untuk filter "MY(...)"
+// TERNYATA berupa INTEGER format YYYYMM (mis. 202402 untuk Februari 2024),
+// BUKAN teks nama bulan ("February 2024" itu cuma formattedValue-nya untuk
+// tampilan) -- jadi formatnya "YYYYMM_INT", bukan "MONTH_YEAR".
+const DATE_PART_WRAPPER_FORMATS = {
+  MY: "YYYYMM_INT",
+};
+
+/**
+ * Kalau fieldName berbentuk "PREFIX(NamaKolomAsli)" dan PREFIX terdaftar di
+ * DATE_PART_WRAPPER_FORMATS, kembalikan { innerField, format }. Kalau tidak
+ * cocok pola itu sama sekali (kasus paling umum — field biasa), return null.
+ */
+function matchDatePartWrapper(fieldName) {
+  const match = /^([A-Za-z_]+)\((.+)\)$/.exec(String(fieldName ?? "").trim());
+  if (!match) return null;
+  const format = DATE_PART_WRAPPER_FORMATS[match[1].toUpperCase()];
+  if (!format) return null;
+  return { innerField: match[2].trim(), format };
+}
+
+// ---------------------------------------------------------------------
+// FIELD FILTER CARD LAIN (di luar wrapper Tableau di atas) yang nilainya
+// berupa TEKS TANGGAL custom (mis. calculated field yang memformat tanggal
+// jadi teks sendiri, BUKAN lewat mekanisme date-part Tableau). Beda dari
+// PARAMETER_VALUE_MAP di atas — field di sini adalah filter CARD biasa
+// (worksheet), bukan parameter.
+//
+// key = nama field PERSIS SAMA seperti fieldCaption (BUKAN yang dibungkus
+// wrapper "MY(...)" dkk. — itu sudah otomatis ditangani di atas), value =
+// format parsing (lihat parseDateTextValue). Format yang didukung SEKARANG:
+//   "MONTH_YEAR" -> teks "<NamaBulanInggris> <Tahun4digit>" (mis. "February
+//   2024"), dikonversi ke tanggal 1 di bulan itu format ISO ("2024-02-01").
+//
+// const DATE_TEXT_FIELDS = {};
+const DATE_TEXT_FIELDS = {};
+
+const MONTH_NAMES_EN = [
+  "january", "february", "march", "april", "may", "june",
+  "july", "august", "september", "october", "november", "december",
+];
+
+/**
+ * Parse SATU nilai tanggal mentah sesuai `format` jadi string ISO
+ * "YYYY-MM-DD" (SELALU tanggal 1 di bulan itu untuk format berbasis bulan).
+ * Format yang didukung:
+ *   - "MONTH_YEAR": teks "<NamaBulanInggris> <Tahun4digit>" (mis.
+ *     "February 2024") -- dipakai untuk DATE_TEXT_FIELDS custom.
+ *   - "YYYYMM_INT": angka/string 6 digit "YYYYMM" (mis. 202402 atau
+ *     "202402") -- dipakai untuk wrapper Tableau "MY(...)", yang nilai
+ *     MENTAHNYA integer, bukan teks nama bulan.
+ * Return `null` kalau nilainya tidak cocok pola yang diharapkan (JANGAN
+ * menebak/memaksakan -- pemanggil harus fallback ke perilaku SET string
+ * biasa kalau ini null).
+ */
+function parseDateTextValue(text, format) {
+  if (format === "MONTH_YEAR") {
+    const match = /^([A-Za-z]+)\s+(\d{4})$/.exec(String(text ?? "").trim());
+    if (!match) return null;
+    const monthIndex = MONTH_NAMES_EN.indexOf(match[1].toLowerCase());
+    if (monthIndex === -1) return null;
+    const year = match[2];
+    const month = String(monthIndex + 1).padStart(2, "0");
+    return `${year}-${month}-01`;
+  }
+  if (format === "YYYYMM_INT") {
+    const match = /^(\d{4})(\d{2})$/.exec(String(text ?? "").trim());
+    if (!match) return null;
+    const year = match[1];
+    const month = match[2];
+    const monthNum = Number(month);
+    if (monthNum < 1 || monthNum > 12) return null;
+    return `${year}-${month}-01`;
+  }
+  return null;
+}
+
+// ---------------------------------------------------------------------
+// CATATAN: pengecualian field-dari-force-apply (dulu diatur di sini lewat
+// EXCLUDED_FILTER_FIELDS) SEKARANG diatur di filter_exclusions.json (root
+// proyek, dibaca backend) — supaya cuma ada SATU tempat untuk mengelola
+// exclusion, bukan dua (satu di frontend/JS, satu di backend/JSON).
+// filter_exclusions.json juga strictly lebih mampu: mendukung exclusion
+// per-datasource dan bersyarat-nilai (when_values_include), yang tidak
+// bisa dilakukan lewat mekanisme lama di sini.
+//
+// Field calculated boolean GATE yang dibangun dari parameter (mis.
+// "Branch Change" = ([P.Branch List] = [Mkpd Branch Name])) TETAP harus
+// dikecualikan dari force-apply — VDS mengevaluasinya pakai nilai
+// parameter PUBLISHED/default (bukan live), yang bisa BERTENTANGAN dengan
+// filter target yang benar dari PARAMETER_FIELD_MAP (mis. "Branch
+// Change=True" tersirat "Mkpd Branch Name = ALL" kalau default
+// parameter-nya "ALL", padahal Anda sedang pilih "CIKOKOL" —
+// dikombinasikan, hasilnya NOL baris). Field seperti ini sekarang
+// didaftarkan di filter_exclusions.json bagian "global" (lihat entry
+// "Branch Change", "Mkpd Branch", "Mkpd Gender" di sana).
+//
+// Beda dari sebelumnya: field ini SEKARANG tetap dikirim sebagai vds
+// (bukan null) dan TAMPIL di teks konteks tanpa anotasi khusus — tapi
+// tetap TIDAK PERNAH dipaksakan ke query_datasource, karena dibuang di
+// backend (dashboard_filters.py) sebelum query dijalankan.
 
 // Batas waktu per-panggilan API ke satu worksheet. Kalau Tableau lambat
 // merespons untuk worksheet tertentu (mis. worksheet tersembunyi yang
@@ -100,7 +229,7 @@ const EXCLUDED_FILTER_FIELDS = new Set(["Branch Change", "Mkpd Branch"]);
 // SEBELUM pesan chat-nya bahkan terkirim) — turunkan supaya gagal LEBIH
 // CEPAT dan kelihatan (lihat log warning di withTimeout di bawah), bukan
 // diam-diam menunggu semenit penuh baru fallback ke [] tanpa jejak apa pun.
-const WORKSHEET_FETCH_TIMEOUT_MS = 15000;
+const WORKSHEET_FETCH_TIMEOUT_MS = 60000;
 
 /**
  * `label` (opsional) dipakai untuk mencatat log WARNING kalau cabang
@@ -184,10 +313,32 @@ async function collectParameterFilters(dashboard) {
     } else {
       // string / int / float / bool -> SET dengan satu nilai (RAW, bukan
       // formattedValue), sama seperti filter kategorikal biasa.
+      //
+      // Kalau parameter ini terdaftar di PARAMETER_VALUE_MAP, terjemahkan
+      // dulu nilai MENTAHNYA (mis. 1/2/3) ke label yang benar-benar ada di
+      // kolom target (mis. "ALL"/"OFFLINE"/"ONLINE") -- lihat penjelasan di
+      // definisi PARAMETER_VALUE_MAP di atas. Kalau nilai mentah yang
+      // muncul TIDAK ada di tabelnya (mis. parameter punya opsi baru yang
+      // belum didaftarkan), JANGAN diam-diam pakai nilai yang salah --
+      // catat warning dan tetap pakai nilai mentah apa adanya sebagai
+      // fallback (perilaku lama), supaya admin tahu perlu menambah entri.
+      let filterValue = cv.value;
+      const valueMap = PARAMETER_VALUE_MAP[param.name];
+      if (valueMap) {
+        if (Object.prototype.hasOwnProperty.call(valueMap, cv.value)) {
+          filterValue = valueMap[cv.value];
+        } else {
+          console.warn(
+            `[tableau-extension] Nilai parameter "${param.name}" = ${cv.value} tidak ada di ` +
+              `PARAMETER_VALUE_MAP -- memakai nilai mentah apa adanya. Tambahkan entrinya kalau ` +
+              `ini bukan nilai yang seharusnya diabaikan.`
+          );
+        }
+      }
       vds = {
         field: { fieldCaption },
         filterType: "SET",
-        values: [cv.value],
+        values: [filterValue],
         exclude: false,
       };
     }
@@ -232,6 +383,41 @@ function getVisibleWorksheets(dashboard) {
 // sub-page pertama yang kebetulan aktif saat extension pertama dimuat.
 let cachedDatasourceNames = [];
 
+// Nama worksheet yang visible SAAT TERAKHIR KALI context berhasil dibaca
+// (lihat buildDashboardState). Dipakai oleh hasVisibleWorksheetSetChanged()
+// di bawah sebagai deteksi MURAH (sinkron, TANPA panggilan API apa pun)
+// untuk perpindahan sub-page/tab -- lihat penjelasan lengkap di dekat
+// definisi hasVisibleWorksheetSetChanged().
+let lastKnownVisibleWorksheetNames = [];
+
+/**
+ * Cek MURAH (properti dashboard.objects sudah tersedia LOKAL di client,
+ * TIDAK perlu round-trip network) apakah SET worksheet yang sedang visible
+ * berbeda dari saat terakhir context berhasil dibaca. Dipakai sebagai
+ * pemicu TAMBAHAN untuk memaksa refresh (selain event FilterChanged/
+ * ParameterChanged biasa), khusus untuk mendeteksi pengguna berpindah sub-
+ * page lewat mekanisme Show/Hide Container -- yang TIDAK memicu event
+ * Extensions API apa pun (lihat window.__ensureFreshDashboardContext).
+ *
+ * SENGAJA tidak memanggil getFiltersAsync()/getDataSourcesAsync() di sini
+ * (itu yang mahal & bisa terlihat sebagai dashboard "refresh" kalau
+ * dilakukan di SETIAP pesan chat) -- cukup bandingkan NAMA worksheet yang
+ * visible, cukup untuk mendeteksi "halaman sudah berbeda", baru KALAU
+ * benar berbeda baru lakukan pembacaan penuh yang mahal itu.
+ */
+function hasVisibleWorksheetSetChanged() {
+  let current;
+  try {
+    const dashboard = tableau.extensions.dashboardContent.dashboard;
+    current = getVisibleWorksheets(dashboard)
+      .map((ws) => ws.name)
+      .sort();
+  } catch (err) {
+    return false; // gagal cek -> jangan memaksa refresh gara-gara ini, biarkan flag stale biasa yang menentukan
+  }
+  return JSON.stringify(current) !== JSON.stringify(lastKnownVisibleWorksheetNames);
+}
+
 /**
  * Interpretasi SATU objek Filter Tableau jadi DUA representasi sekaligus:
  *   - text: baris ringkasan untuk badge UI / prompt LLM (konteks bacaan)
@@ -267,6 +453,48 @@ function buildSetOrDateFilter(fieldName, appliedValues) {
   const sample = withValue[0].value;
   const displayText = `${fieldName} = [${withValue.map((v) => v.formattedValue).join(", ")}]`;
 
+  // Kalau fieldName dibungkus wrapper date-part bawaan Tableau (mis. "MY(Mkpd
+  // Period)"), nama kolom ASLI yang valid untuk VizQL Data Service adalah isi
+  // di dalam kurung -- WAJIB dipakai di SEMUA cabang di bawah (bukan cuma
+  // saat parsing teks-tanggal berhasil), karena "MY(Mkpd Period)" itu sendiri
+  // BUKAN nama kolom yang bisa dikenali VDS sama sekali. Kalau tidak match
+  // wrapper apa pun, targetFieldCaption = fieldName apa adanya (perilaku lama).
+  const wrapperMatch = matchDatePartWrapper(fieldName);
+  const targetFieldCaption = wrapperMatch ? wrapperMatch.innerField : fieldName;
+  const dateTextFormat = wrapperMatch ? wrapperMatch.format : DATE_TEXT_FIELDS[fieldName];
+
+  // Field TEKS TANGGAL (dari wrapper Tableau di atas, ATAU dari
+  // DATE_TEXT_FIELDS untuk kasus custom) -- field-nya bertipe STRING di
+  // Tableau (bukan tanggal asli), jadi TIDAK akan pernah masuk cabang
+  // `instanceof Date` di bawah. Coba parse SEMUA nilai yang dipilih; kalau
+  // SEMUA berhasil, kirim sebagai QUANTITATIVE_DATE (cocok dengan format
+  // kolom ISO asli di datasource) alih-alih SET string literal ("February
+  // 2024") yang tidak akan pernah match. Kalau ADA yang gagal di-parse
+  // (format tak terduga), fallback AMAN ke perilaku SET string biasa di
+  // bawah + catat warning, JANGAN diam-diam kirim data yang salah.
+  if (dateTextFormat) {
+    const parsedIsoDates = withValue.map((v) => parseDateTextValue(v.value, dateTextFormat));
+    if (parsedIsoDates.every((d) => d !== null)) {
+      const minDate = parsedIsoDates.reduce((a, b) => (a < b ? a : b));
+      const maxDate = parsedIsoDates.reduce((a, b) => (a > b ? a : b));
+      return {
+        text: displayText,
+        vds: {
+          field: { fieldCaption: targetFieldCaption },
+          filterType: "QUANTITATIVE_DATE",
+          quantitativeFilterType: "RANGE",
+          minDate,
+          maxDate,
+        },
+      };
+    }
+    console.warn(
+      `[tableau-extension] Gagal mem-parsing nilai field teks-tanggal "${fieldName}" ` +
+        `(format "${dateTextFormat}") dari nilai: ${JSON.stringify(withValue.map((v) => v.value))} -- ` +
+        `fallback ke filter SET string biasa (kemungkinan besar TIDAK akan match kolom aslinya).`
+    );
+  }
+
   if (sample instanceof Date) {
     const isoDates = withValue
       .map((v) => {
@@ -282,7 +510,7 @@ function buildSetOrDateFilter(fieldName, appliedValues) {
     return {
       text: displayText,
       vds: {
-        field: { fieldCaption: fieldName },
+        field: { fieldCaption: targetFieldCaption },
         filterType: "QUANTITATIVE_DATE",
         quantitativeFilterType: "RANGE",
         minDate,
@@ -308,7 +536,7 @@ function buildSetOrDateFilter(fieldName, appliedValues) {
   return {
     text: displayText,
     vds: {
-      field: { fieldCaption: fieldName },
+      field: { fieldCaption: targetFieldCaption },
       filterType: "SET",
       values: rawValues,
       exclude: false,
@@ -317,22 +545,13 @@ function buildSetOrDateFilter(fieldName, appliedValues) {
 }
 
 function interpretFilter(filter) {
-  // Field yang secara eksplisit dikecualikan (lihat EXCLUDED_FILTER_FIELDS
-  // di atas) — biasanya calculated boolean gate yang dibangun dari
-  // parameter. TETAP ditampilkan di teks (transparansi), TAPI TIDAK PERNAH
-  // diterapkan sebagai filter VDS, supaya tidak bertentangan dengan filter
-  // yang benar dari parameter aslinya (lihat PARAMETER_FIELD_MAP).
-  if (EXCLUDED_FILTER_FIELDS.has(filter.fieldName)) {
-    const valueText =
-      filter.appliedValues && filter.appliedValues.length > 0
-        ? filter.appliedValues.map((v) => v.formattedValue).join(", ")
-        : "?";
-    return {
-      field: filter.fieldName,
-      text: `${filter.fieldName} = [${valueText}] (dikecualikan dari filter query — lihat EXCLUDED_FILTER_FIELDS)`,
-      vds: null,
-    };
-  }
+  // Field calculated boolean GATE (mis. "Branch Change") dulu dikecualikan
+  // di SINI (lewat EXCLUDED_FILTER_FIELDS) -- sekarang exclusion-nya
+  // ditangani SATU tempat saja di backend lewat filter_exclusions.json
+  // (bagian "global"), supaya tidak ada dua mekanisme paralel. Field ini
+  // tetap diproses NORMAL di bawah (vds tetap dibuat), dan tetap tampil
+  // di teks konteks tanpa anotasi khusus -- backend yang membuang filternya
+  // sebelum query dijalankan, lihat dashboard_filters.py.
 
   let result;
   try {
@@ -459,6 +678,11 @@ async function buildDashboardState() {
   const fieldDatasources = new Map(); // fieldCaption -> Set<datasourceName>
 
   const worksheets = getVisibleWorksheets(dashboard);
+
+  // Perbarui baseline untuk hasVisibleWorksheetSetChanged() SEKARANG (bukan
+  // di akhir fungsi) -- baseline harus mencerminkan worksheet yang SEDANG
+  // dibaca oleh pembacaan penuh ini, supaya perbandingan berikutnya akurat.
+  lastKnownVisibleWorksheetNames = worksheets.map((ws) => ws.name).sort();
 
   // Promise.all, BUKAN for...of sequential -> getFiltersAsync()/
   // getDataSourcesAsync() untuk semua worksheet dipanggil BERSAMAAN. Dengan
@@ -588,21 +812,42 @@ async function buildDashboardState() {
   }
 
   // Parameter dashboard (BUKAN filter — lihat collectParameterFilters di
-  // atas untuk penjelasan bedanya). Selalu OTORITATIF untuk field yang
-  // dipetakan lewat PARAMETER_FIELD_MAP: menimpa hasil voting filter biasa
-  // kalau kebetulan menyasar field yang sama, karena parameter cuma punya
-  // SATU sumber nilai per dashboard (tidak ada konsep "mayoritas worksheet"
-  // yang relevan untuknya). Parameter levelnya WORKBOOK, bukan per-worksheet,
-  // jadi TIDAK diikat ke datasource tertentu (sourceDatasources dibiarkan
-  // null/broadcast) — kalau field targetnya tidak ada di suatu datasource,
-  // itu sudah ditangani terpisah oleh proactive field-check di
-  // tableau_client.py (field dibuang otomatis + dicatat ke pengguna).
+  // atas untuk penjelasan bedanya). Parameter levelnya WORKBOOK, bukan
+  // per-worksheet, jadi TIDAK diikat ke datasource tertentu
+  // (sourceDatasources dibiarkan null/broadcast) — kalau field targetnya
+  // tidak ada di suatu datasource, itu sudah ditangani terpisah oleh
+  // proactive field-check di tableau_client.py (field dibuang otomatis +
+  // dicatat ke pengguna).
+  //
+  // PRIORITAS: filter dari WORKSHEET CARD (di atas) MENANG kalau field
+  // targetnya SUDAH punya nilai dari sana -- parameter HANYA dipakai untuk
+  // field yang belum punya filter card sama sekali. Ini SENGAJA dibalik
+  // dari perilaku lama (parameter selalu menimpa): parameter itu level
+  // WORKBOOK dan bisa saja sebenarnya "milik" sub-page LAIN yang kebetulan
+  // dipetakan (lewat PARAMETER_FIELD_MAP) ke fieldCaption yang SAMA dengan
+  // field yang di halaman INI punya filter card-nya sendiri secara
+  // independen (mis. parameter "P.Remark Online" -> field "Mkpd Online",
+  // padahal worksheet di halaman "Sales Offline" ini SUDAH punya filter
+  // card "Mkpd Online" sendiri) -- nilai parameter yang stale/tidak
+  // terkait halaman ini TIDAK BOLEH menimpa nilai filter card yang justru
+  // paling akurat mencerminkan halaman yang SEDANG dilihat pengguna.
   const parameterFilters = await collectParameterFilters(dashboard);
   for (const p of parameterFilters) {
     allFilterFieldsSeen.add(p.field);
     fieldDisplayText.set(p.field, p.text);
     p.vds.sourceDatasources = null;
-    vdsFiltersByField.set(p.vds.field.fieldCaption, p.vds);
+
+    const fieldCaption = p.vds.field.fieldCaption;
+    if (vdsFiltersByField.has(fieldCaption)) {
+      console.warn(
+        `[tableau-extension] Parameter "${p.field}" dipetakan ke field "${fieldCaption}" yang ` +
+          `SUDAH punya filter dari worksheet card di halaman ini -- nilai dari WORKSHEET FILTER ` +
+          `CARD yang dipakai (bukan nilai parameter), karena parameter level-workbook bisa saja ` +
+          `sebenarnya untuk sub-page lain.`
+      );
+      continue;
+    }
+    vdsFiltersByField.set(fieldCaption, p.vds);
   }
 
   console.debug(`[tableau-extension] ${parameterFilters.length} parameter dibaca:`, parameterFilters.map(p => p.text));
@@ -719,15 +964,21 @@ function markDashboardContextStale() {
 }
 
 /**
- * Dipanggil dari app.js. Kalau context masih valid (belum ada filter yang
- * berubah sejak terakhir dibaca), langsung kembalikan cache tanpa
- * memanggil API apa pun. Kalau basi, baru benar-benar membaca ulang.
+ * Dipanggil dari app.js SEBELUM tiap pesan chat dikirim. Kalau context
+ * masih valid (belum ada filter yang berubah sejak terakhir dibaca, DAN
+ * set worksheet yang visible juga tidak berubah), langsung kembalikan
+ * cache TANPA memanggil API apa pun ke Tableau -- ini yang mencegah
+ * dashboard "refresh"/round-trip berulang di SETIAP pesan chat padahal
+ * tidak ada yang berubah. Kalau salah satu basi (event filter/parameter
+ * SUNGGUHAN, ATAU pengguna pindah sub-page lewat Show/Hide Container yang
+ * terdeteksi lewat hasVisibleWorksheetSetChanged), baru benar-benar
+ * membaca ulang penuh.
  */
 window.__ensureFreshDashboardContext = async function () {
   if (!window.__isTableauExtension) {
     return { text: "", filters: [], datasourceNames: [], totalFilterCount: 0 };
   }
-  if (!window.__dashboardContextStale) {
+  if (!window.__dashboardContextStale && !hasVisibleWorksheetSetChanged()) {
     return {
       text: window.__dashboardContext,
       filters: window.__dashboardFilters,

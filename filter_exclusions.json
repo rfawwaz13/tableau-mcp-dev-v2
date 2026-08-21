@@ -5,6 +5,11 @@
     "dibaca ULANG OTOMATIS oleh backend setiap kali agent menjalankan query",
     "-- edit & simpan kapan pun, TANPA perlu restart server atau ubah kode.",
     "",
+    "INI SATU-SATUNYA TEMPAT untuk mengelola exclusion filter di seluruh",
+    "proyek -- sebelumnya ada mekanisme kedua (EXCLUDED_FILTER_FIELDS di",
+    "static/tableau-extension.js) yang sudah DIHAPUS dan digantikan penuh",
+    "oleh file ini, supaya tidak ada dua tempat yang perlu disinkronkan.",
+    "",
     "Nama field di bawah harus PERSIS SAMA dengan fieldCaption yang dipakai",
     "Tableau (lihat baris 'Filter: ...' di teks konteks dashboard yang",
     "dikirim ke chat, atau panggil tool get_datasource_metadata). Untuk",
@@ -17,7 +22,12 @@
     "Tiap entry field di 'global'/'per_datasource' boleh berupa:",
     "  - STRING biasa, mis. \"Sources\" -> field ini dikecualikan TOTAL, apa",
     "    pun nilai yang sedang dipilih di dashboard. Cocok untuk field yang",
-    "    memang tidak relevan sama sekali untuk datasource ini.",
+    "    memang tidak relevan sama sekali untuk datasource ini, ATAU untuk",
+    "    calculated field boolean GATE yang dibangun dari parameter (mis.",
+    "    'Branch Change') -- VDS mengevaluasi field seperti ini pakai nilai",
+    "    parameter PUBLISHED/default (bukan live), yang bisa BERTENTANGAN",
+    "    dengan filter target yang benar dari PARAMETER_FIELD_MAP, jadi",
+    "    HARUS selalu dikecualikan total, apa pun nilainya.",
     "  - OBJEK { \"field\": \"Kota\", \"when_values_include\": [\"ALL\"] } ->",
     "    dikecualikan HANYA kalau nilai yang sedang dipilih termasuk salah",
     "    satu di 'when_values_include'. Kalau pengguna mengubah filter itu",
@@ -28,7 +38,8 @@
     "    bukan mematikan field itu selamanya.",
     "",
     "'global': entry di sini berlaku untuk SEMUA datasource, apa pun yang",
-    "  sedang di-query.",
+    "  sedang di-query. Isinya field GATE calculated (lihat penjelasan di",
+    "  atas) yang memang tidak boleh dipaksakan ke datasource MANA PUN.",
     "",
     "'per_datasource': entry di sini berlaku HANYA untuk datasource dengan",
     "  nama itu (pencocokan nama toleran -- boleh beda akhiran, mis.",
@@ -45,13 +56,23 @@
     "  'per_datasource' di atas."
   ],
 
-  "global": [],
+  "global": ["Branch Change", "Mkpd Branch", "Mkpd Gender"],
 
   "per_datasource": {
     "temp_alfagift_sales_dummy": [
+      { "field": "Brand", "when_values_include": ["ALL"] },
+      { "field": "Kategori", "when_values_include": ["ALL"] },
+      { "field": "Kota", "when_values_include": ["ALL"] },
+      { "field": "Produk", "when_values_include": ["ALL"] },
+      { "field": "Branch", "when_values_include": ["ALL"] },
+      { "field": "Mkpd Branch Name", "when_values_include": ["ALL"] },
       "Sources",
       "New Sources",
       "Jenis Pembelian"
+    ],
+    "temp_member_kpi_plu_dummy": [
+      "Mkpd Branch",
+      "Mkpd Gender"
     ]
   },
 

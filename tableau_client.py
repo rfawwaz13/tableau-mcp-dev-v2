@@ -9,6 +9,15 @@ get view data (CSV), dan query datasource (VizQL Data Service).
 Dokumentasi resmi:
 - REST API: https://help.tableau.com/current/api/rest_api/en-us/REST/rest_api_ref.htm
 - VizQL Data Service: https://help.tableau.com/current/api/vizql-data-service/en-us/index.html
+
+PENTING — kode di file ini (lewat tableau_mcp_server.py) berjalan sebagai
+SUBPROCESS MCP dengan transport stdio: stdout PROSES INI dipakai murni untuk
+protokol JSON-RPC (dibaca baris-per-baris oleh mcp.client.stdio.stdio_client
+di proses induk). JANGAN PERNAH pakai `print()` biasa (yang menulis ke
+stdout) di sini — itu akan tercampur dengan pesan JSON-RPC dan merusak
+protokolnya. Semua logging/debug print DI FILE INI WAJIB pakai
+`file=sys.stderr` (stderr diteruskan dengan aman ke proses induk lewat
+parameter `errlog` di stdio_client, TIDAK dipakai protokol sama sekali).
 """
 
 from __future__ import annotations
@@ -16,8 +25,10 @@ from __future__ import annotations
 import os
 import json
 import re
+import sys
 import httpx
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Optional
 
 
@@ -27,6 +38,36 @@ class TableauAuthError(Exception):
 
 class TableauAPIError(Exception):
     pass
+
+
+_QUERY_LOG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "query_debug.log")
+
+
+def _log_debug(message: str) -> None:
+    """
+    Cetak pesan debug ke DUA tempat sekaligus:
+    1. stderr (aman dari korupsi protokol MCP — lihat catatan di docstring
+       modul ini) — biasanya langsung terlihat di terminal tempat server
+       dijalankan.
+    2. query_debug.log (file teks, di root proyek) — SELALU bisa diakses apa
+       pun terminal yang dipakai. Beberapa terminal (mis. Cursor/VS Code,
+       yang menjalankan proses lewat pseudo-terminal/ConPTY) tidak selalu
+       meneruskan stderr proses BERTINGKAT dengan andal — subprocess MCP ini
+       levelnya CUCU dari terminal (terminal -> uvicorn -> subprocess MCP),
+       bukan anak langsung, jadi rawan "hilang" di beberapa setup meski
+       kodenya sudah benar. File ini jadi jalur cadangan yang tidak
+       bergantung pada perilaku terminal sama sekali.
+
+    Kegagalan menulis ke file TIDAK BOLEH menghentikan query — cuma dicatat
+    sebagai warning tambahan ke stderr.
+    """
+    print(message, file=sys.stderr)
+    try:
+        with open(_QUERY_LOG_PATH, "a", encoding="utf-8") as fh:
+            timestamp = datetime.now().isoformat(timespec="seconds")
+            fh.write(f"[{timestamp}] {message}\n")
+    except OSError as exc:
+        print(f"[tableau_client] Gagal menulis ke {_QUERY_LOG_PATH}: {exc}", file=sys.stderr)
 
 
 @dataclass
@@ -437,19 +478,36 @@ class TableauClient:
             query["fields"] = kept_output_fields
 
             if corrected:
-                print(f"[tableau_client] Auto-koreksi nama field (beda kapitalisasi/spasi): {'; '.join(corrected)}")
+                _log_debug(
+                    f"[tableau_client] Auto-koreksi nama field (beda kapitalisasi/spasi): {'; '.join(corrected)}"
+                )
 
         url = f"{self.config.server}/api/v1/vizql-data-service/query-datasource"
         max_attempts = 15  # jaring pengaman lapis 2 (reaktif), jangan sampai loop tanpa henti
 
-        for _ in range(max_attempts):
+        for attempt in range(max_attempts):
             body = {
                 "datasource": {"datasourceLuid": datasource_luid},
                 "query": query,
             }
+            # Log QUERY LENGKAP (fields output + SEMUA filter beserta nilainya)
+            # persis seperti yang dikirim ke Tableau -- ini bukti pasti untuk
+            # dibandingkan langsung dengan query manual, saat angka yang
+            # ditampilkan agent berbeda dari hasil manual pengguna. Dicetak di
+            # SETIAP percobaan (bukan cuma sekali) supaya kalau ada retry
+            # akibat self-healing, evolusinya (field apa yang dibuang/
+            # dikoreksi di antara percobaan) ikut terlihat.
+            attempt_note = f" (percobaan ke-{attempt + 1})" if attempt > 0 else ""
+            _log_debug(
+                f"[tableau_client] query_datasource -> datasourceLuid={datasource_luid}{attempt_note}\n"
+                f"{json.dumps(query, indent=2, ensure_ascii=False)}"
+            )
             resp = await self._http.post(url, json=body, headers=self._auth_headers())
             if resp.status_code == 200:
-                return resp.json(), skipped
+                result = resp.json()
+                row_count = len(result.get("data", [])) if isinstance(result, dict) else None
+                _log_debug(f"[tableau_client] query_datasource berhasil -> {row_count} baris dikembalikan.")
+                return result, skipped
 
             unknown_field = self._extract_unknown_field(resp.text)
             if unknown_field and self._strip_field(query, unknown_field):

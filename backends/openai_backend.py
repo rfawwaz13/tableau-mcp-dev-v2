@@ -22,7 +22,7 @@ from mcp.client.stdio import stdio_client
 from dashboard_filters import datasource_in_scope, merge_dashboard_filters, parse_datasource_names
 from field_mappings import build_field_hints_block
 
-MODEL_NAME = os.environ.get("OPENAI_MODEL", "gpt-4.1")
+MODEL_NAME = os.environ.get("OPENAI_MODEL", "gpt-5-nano")
 # backends/ ada satu level di bawah root proyek, tableau_mcp_server.py ada di root.
 SERVER_SCRIPT = os.path.join(os.path.dirname(os.path.dirname(__file__)), "tableau_mcp_server.py")
 MAX_TOOL_LOOPS = 8

@@ -191,6 +191,8 @@ function connect() {
   ws.onerror = () => ws.close();
 }
 
+let hasSentFirstMessage = false;
+
 async function submitMessage() {
   const text = input.value.trim();
   if (!text || ws.readyState !== WebSocket.OPEN) return;
@@ -202,29 +204,24 @@ async function submitMessage() {
   suggestionsBox.innerHTML = "";
   showThinking();
 
-  // SELALU paksa baca ulang konteks dashboard SUNGGUHAN sebelum TIAP pesan
-  // dikirim — JANGAN percaya flag "stale" di sini sama sekali (beda dari
-  // pemakaian __dashboardContextStale di tempat lain, mis. badge UI, yang
-  // memang boleh mengandalkan flag itu).
+  // PESAN PERTAMA dalam sesi ini: JANGAN percaya cache sama sekali (walau
+  // stale === false), paksa baca ulang langsung dari dashboard. Ini jaring
+  // pengaman terhadap race condition di awal load — snapshot pertama saat
+  // extension baru dimuat kadang belum mencerminkan state final Tableau
+  // (lihat catch-up read di tableau-extension.js).
   //
-  // Alasan: Tableau Extensions API TIDAK punya event untuk mendeteksi
-  // pengguna berpindah SUB-PAGE/tab di dalam satu dashboard (pola umum:
-  // tombol Show/Hide Container yang menukar worksheet/datasource yang
-  // ditampilkan). FilterChanged/ParameterChanged HANYA terpicu kalau nilai
-  // filter/parameter sungguhan berubah — bukan saat container disembunyikan/
-  // ditampilkan. Kalau kita mengandalkan flag stale di titik pengiriman
-  // pesan, pengguna yang pindah sub-page (mis. dari "Sales" ke
-  // "Sales Online", yang datasource-nya berbeda) lalu langsung bertanya
-  // akan tetap dapat CONTEXT LAMA (termasuk daftar datasource & filter dari
-  // sub-page sebelumnya) — itu penyebab agent salah tarik datasource.
-  //
-  // Baca ulang tepat di sini (sesaat sebelum kirim, bukan reaktif terhadap
-  // event) murah dan aman dari resource contention: pengguna baru selesai
-  // mengetik + klik kirim, jadi dashboard biasanya sudah selesai re-render
-  // apa pun sebelumnya.
-  if (window.__isTableauExtension) {
+  // Untuk pesan-pesan SELANJUTNYA, TIDAK perlu lagi memaksa refresh di sini:
+  // window.__ensureFreshDashboardContext() sekarang punya deteksi MURAH
+  // (sinkron, tanpa panggilan API) sendiri untuk perpindahan sub-page lewat
+  // hasVisibleWorksheetSetChanged() di tableau-extension.js — jadi
+  // perpindahan sub-page (mis. dari "Sales" ke "Sales Online") tetap
+  // terdeteksi otomatis, TANPA perlu melakukan round-trip API penuh ke
+  // Tableau di SETIAP pesan (yang costly dan terlihat sebagai dashboard
+  // "refresh" berulang meski tidak ada apa pun yang berubah).
+  if (!hasSentFirstMessage && window.__isTableauExtension) {
     window.__dashboardContextStale = true;
   }
+  hasSentFirstMessage = true;
 
   // Baca filter dashboard SEKARANG, tepat sebelum dikirim — bukan pakai
   // nilai yang sudah basi dari sub-page/pertanyaan sebelumnya.
